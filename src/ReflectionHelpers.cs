@@ -270,7 +270,8 @@ internal static class ReflectionHelpers
     {
         if (value is DamageResult typedDamageResult)
         {
-            amount = typedDamageResult.UnblockedDamage;
+            // Credit resolved damage to enemy block and HP; excess overkill is excluded.
+            amount = typedDamageResult.TotalDamage;
             return amount > 0;
         }
 

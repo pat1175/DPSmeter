@@ -70,6 +70,12 @@ irm https://raw.githubusercontent.com/xvc323/DPSmeter/main/scripts/uninstall-win
 
 ## Save handling
 
+Outgoing damage includes damage absorbed by enemy block plus actual HP damage. For example,
+a 30-damage hit against 20 block credits 30 damage (20 block + 10 HP). Fully blocked hits
+also count. Excess overkill beyond the target's remaining HP is excluded. This applies to
+fight/run totals and last/max values; previously saved totals are not recalculated.
+See [damage checks](checks/DAMAGE.md) for regression-test instructions.
+
 The install and uninstall scripts **do not touch, copy, delete, symlink, or junction any saves**. They only install or remove the `mods/DPSMeter` folder.
 
 STS2 stores modded and unmodded saves separately once any mod is loaded. Do **not** automate save sharing with symlinks or Windows junctions: Steam Cloud may treat the linked folder as real save data and overwrite progression in the other profile.
