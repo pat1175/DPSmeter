@@ -124,11 +124,26 @@ internal static class ReflectionHelpers
     /// Resolves a stable run identifier that survives save &amp; quit.
     /// Navigates runState.Rng.StringSeed which is constant for a given run.
     /// </summary>
+    public static long ResolveRunStartTime()
+        => TryGetMemberValue(RunManager.Instance, "_startTime") is long started ? started : 0;
+
+    public static string ResolveSessionGroup(object? runState)
+    {
+        if (runState is not IRunState run) return "";
+        return RunIdentity.Create(run.Rng.StringSeed, 0, run.GameMode.ToString(),
+            MegaCrit.Sts2.Core.Saves.SaveManager.Instance.GetProfileScopedPath("party_meter"),
+            run.Players.Select(player => player.NetId));
+    }
+
     public static string ResolveStableRunId(object? runState)
     {
         if (runState is IRunState typedRunState)
         {
-            return typedRunState.Rng.StringSeed ?? string.Empty;
+            long started = ResolveRunStartTime();
+            if (started <= 0) return string.Empty;
+            string profile = MegaCrit.Sts2.Core.Saves.SaveManager.Instance.GetProfileScopedPath("party_meter");
+            return RunIdentity.Create(typedRunState.Rng.StringSeed, started, typedRunState.GameMode.ToString(),
+                profile, typedRunState.Players.Select(player => player.NetId));
         }
 
         if (runState == null) return string.Empty;

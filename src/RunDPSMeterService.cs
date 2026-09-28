@@ -10,12 +10,18 @@ using MegaCrit.Sts2.Core.Models.Powers;
 
 namespace DPSMeter;
 
-public static class RunDPSMeterService
+public static partial class RunDPSMeterService
 {
     private static readonly object SyncRoot = new();
     private static readonly Dictionary<ulong, PlayerDamageSnapshot> Totals = new();
-    private static readonly string SavePath = ProjectSettings.GlobalizePath("user://dps_meter_state.json");
+    private static string SavePath => ProjectSettings.GlobalizePath("user://dps_meter_state.json");
 
+    private static RunArchiveStore? _archives;
+    private static RunArchiveStore Archives => _archives ??= new(ProjectSettings.GlobalizePath("user://party_meter_runs"));
+    private static SavedState? _beforeCombatState;
+    private static string? _lastCombatKey;
+    private static string _sessionGroup = "";
+    private static long _startedAt;
     private static string? _currentRunToken;
     private static string? _stableRunId;
     private static int _combatIndex;
@@ -28,12 +34,17 @@ public static class RunDPSMeterService
     private static readonly Dictionary<Creature, PendingDoomDamage> PendingDoomDamageByCreature = new();
 
     public static event Action<OverlayState>? Changed;
+    private static OverlayState? _completedState;
 
-    public static void BeginRun(object? runState)
+    public static void BeginRun(object? runState, bool resuming = true)
     {
-        string nextToken = ReflectionHelpers.ResolveRunToken(runState);
+        _completedState = null;
+        string seed = ReflectionHelpers.ResolveRunToken(runState);
         string stableId = ReflectionHelpers.ResolveStableRunId(runState);
+        string nextToken = string.IsNullOrEmpty(stableId) ? seed : stableId;
         List<PlayerHandle> knownPlayers = CollectKnownPlayers(runState);
+        _startedAt = ReflectionHelpers.ResolveRunStartTime();
+        _sessionGroup = ReflectionHelpers.ResolveSessionGroup(runState);
         bool shouldPublish;
 
         lock (SyncRoot)
@@ -53,10 +64,9 @@ public static class RunDPSMeterService
             }
 
             // Try restoring from disk if stable ID matches
-            else if (!string.IsNullOrEmpty(stableId) && TryLoadState(stableId))
+            else if (!string.IsNullOrEmpty(stableId) && TryLoadState(stableId, seed, knownPlayers, resuming))
             {
                 _currentRunToken = nextToken;
-                _stableRunId = stableId;
                 shouldPublish = RegisterKnownPlayers(knownPlayers) || true;
             }
 
@@ -64,6 +74,7 @@ public static class RunDPSMeterService
             else
             {
                 Totals.Clear();
+                SupportedCards.Clear();
                 PendingDoomDamageByCreature.Clear();
                 _currentRunToken = nextToken;
                 _stableRunId = stableId;
@@ -72,6 +83,11 @@ public static class RunDPSMeterService
                 _activePlayerKey = null;
                 _damageCounter = 0;
 
+                KillCredits.Clear();
+                Deaths.Clear();
+                HealingSource.Value = null;
+                _lastCombatKey = null;
+                _beforeCombatState = null;
                 RegisterKnownPlayers(knownPlayers);
                 shouldPublish = true;
             }
@@ -85,19 +101,28 @@ public static class RunDPSMeterService
     {
         List<PlayerHandle> knownPlayers = CollectKnownPlayers(runState, combatState);
 
-        SaveState();
-
+        string combatKey = (runState is MegaCrit.Sts2.Core.Runs.IRunState run ? run.RunLocation.ToString() : "unknown")
+            + "|" + (combatState is CombatState combat ? combat.Encounter?.Id.ToString() : "unknown");
         lock (SyncRoot)
         {
+            // A saved game can replay the last room. Replace its contribution instead of adding it twice.
+            if (_lastCombatKey == combatKey && _beforeCombatState != null)
+                RestoreSavedPlayers(_beforeCombatState);
+            _beforeCombatState = CaptureSavedState(false);
+            _lastCombatKey = combatKey;
+            KillCredits.Clear();
+            Deaths.Clear();
             _combatIndex++;
             _combatActive = combatState != null;
             _activePlayerKey = null;
             PendingDoomDamageByCreature.Clear();
+            SupportedCards.Clear();
 
             RegisterKnownPlayers(knownPlayers);
 
             foreach (PlayerDamageSnapshot snapshot in Totals.Values)
             {
+                snapshot.CombatSupport = new SupportMetrics();
                 snapshot.CombatDamage = 0m;
                 snapshot.CardsPlayed = 0;
                 snapshot.AttackCardsPlayed = 0;
@@ -115,6 +140,7 @@ public static class RunDPSMeterService
             }
         }
 
+        SaveState();
         Publish();
     }
 
@@ -135,6 +161,9 @@ public static class RunDPSMeterService
         {
             PlayerDamageSnapshot snapshot = GetOrCreate(handle);
             ApplyHandle(snapshot, handle);
+            bool supported = SupportedCards.Remove(cardPlay!);
+            snapshot.CombatSupport.RecordCard(card.Type.ToString(), cardPlay!.IsAutoPlay, supported);
+            snapshot.RunSupport.RecordCard(card.Type.ToString(), cardPlay.IsAutoPlay, supported);
             snapshot.CardsPlayed++;
             if (cardPlay!.IsAutoPlay)
             {
@@ -254,6 +283,13 @@ public static class RunDPSMeterService
         {
             PlayerDamageSnapshot snapshot = GetOrCreate(handle);
             ApplyHandle(snapshot, handle);
+            foreach (var stats in new[] { snapshot.CombatSupport, snapshot.RunSupport })
+            {
+                stats.Incoming += incoming;
+                stats.Blocked += blocked;
+                stats.HpLost += hpLost;
+                stats.MaxHpLost = Math.Max(stats.MaxHpLost, hpLost);
+            }
             snapshot.IncomingDamage += incoming;
             snapshot.BlockedDamage += blocked;
             snapshot.HpLostDamage += hpLost;
@@ -282,6 +318,8 @@ public static class RunDPSMeterService
         {
             PlayerDamageSnapshot snapshot = GetOrCreate(handle);
             ApplyHandle(snapshot, handle);
+            snapshot.CombatSupport.BlockReceived += decimal.Truncate(amount);
+            snapshot.RunSupport.BlockReceived += decimal.Truncate(amount);
             snapshot.BlockGained += amount;
             snapshot.LastUpdatedUtc = DateTime.UtcNow;
         }
@@ -308,20 +346,13 @@ public static class RunDPSMeterService
 
     public static void EndRun()
     {
-        lock (SyncRoot)
-        {
-            Totals.Clear();
-            PendingDoomDamageByCreature.Clear();
-            _currentRunToken = null;
-            _stableRunId = null;
-            _combatIndex = 0;
-            _combatActive = false;
-            _activePlayerKey = null;
-            _damageCounter = 0;
-            CurrentPoisonContext.Value = null;
-            CurrentSourceDamageContext.Value = null;
-            CurrentCardDamageAggregation.Value = null;
-        }
+        var finished = BuildOverlayState();
+        SaveState(completed: true);
+        try { System.IO.File.WriteAllText(ProjectSettings.GlobalizePath("user://party_meter_last_run.txt"), BuildShareSummary(true)); }
+        catch (Exception error) { GD.PrintErr("[DPSMeter] Could not save run summary: " + error.Message); }
+        ResetTrackingMemory();
+        // Keep the final report reviewable on the game-over screen, until the menu opens.
+        _completedState = finished;
 
         DeletePersistedState();
         Publish();
@@ -467,8 +498,7 @@ public static class RunDPSMeterService
             _damageCounter++;
         }
 
-        if (_damageCounter % 10 == 0)
-            SaveState();
+        // Persist at combat boundaries: a resumed combat can replay its events.
 
         Publish();
     }
@@ -564,6 +594,8 @@ public static class RunDPSMeterService
                 }
 
                 PendingDoomDamageByCreature[creature] = new PendingDoomDamage(applier, creature.CurrentHp);
+                if (ReflectionHelpers.TryResolvePlayerHandle(applier, out var owner))
+                    CaptureKillCandidate(creature, owner);
             }
         }
     }
@@ -616,8 +648,7 @@ public static class RunDPSMeterService
             _damageCounter++;
         }
 
-        if (_damageCounter % 10 == 0)
-            SaveState();
+        // Persist at combat boundaries: a resumed combat can replay its events.
 
         Publish();
     }
@@ -666,6 +697,7 @@ public static class RunDPSMeterService
 
     public static OverlayState BuildOverlayState()
     {
+        if (_completedState != null) return _completedState;
         List<PlayerDamageSnapshot> snapshots;
         string runToken;
         int combatIndex;
@@ -781,39 +813,38 @@ public static class RunDPSMeterService
 
     // ── Persistence ────────────────────────────────────────────
 
-    private static void SaveState()
+    private static SavedState CaptureSavedState(bool withCheckpoint) => new()
+    {
+        StableRunId = _stableRunId ?? "",
+        SessionGroup = _sessionGroup,
+        StartedAt = _startedAt,
+        CombatIndex = _combatIndex,
+        LastCombatKey = withCheckpoint ? _lastCombatKey : null,
+        BeforeCombat = withCheckpoint ? _beforeCombatState : null,
+        Players = Totals.Values.Select(player => new SavedPlayer
+        {
+            PlayerKey = player.PlayerKey, DisplayName = player.DisplayName, CharacterName = player.CharacterName,
+            TotalDamage = player.TotalDamage, CombatDamage = player.CombatDamage, MaxHitDamage = player.MaxHitDamage,
+            RunSupport = player.RunSupport.Clone(), CombatSupport = player.CombatSupport.Clone()
+        }).ToList()
+    };
+
+    private static void SaveState(bool completed = false)
     {
         try
         {
-            SavedState state;
             lock (SyncRoot)
             {
                 if (string.IsNullOrEmpty(_stableRunId)) return;
-
-                state = new SavedState
-                {
-                    StableRunId = _stableRunId,
-                    CombatIndex = _combatIndex,
-                    Players = Totals.Values.Select(s => new SavedPlayer
-                    {
-                        PlayerKey = s.PlayerKey,
-                        DisplayName = s.DisplayName,
-                        CharacterName = s.CharacterName,
-                        TotalDamage = s.TotalDamage,
-                        MaxHitDamage = s.MaxHitDamage
-                    }).ToList()
-                };
+                // An interrupted fight restarts in the game. Save its baseline, not partial totals.
+                SavedState state = _combatActive && !completed && _beforeCombatState != null
+                    ? _beforeCombatState : CaptureSavedState(true);
+                state.Completed = completed;
+                Archives.Save(state);
             }
-
-            string json = JsonSerializer.Serialize(state, SavedStateCtx.Default.SavedState);
-            System.IO.File.WriteAllText(SavePath, json);
         }
-        catch
-        {
-            // Silently ignore save errors
-        }
+        catch (Exception error) { GD.PrintErr("[DPSMeter] Run checkpoint failed: " + error.Message); }
     }
-
 
     private static void DeletePersistedState()
     {
@@ -830,41 +861,63 @@ public static class RunDPSMeterService
         }
     }
 
-    private static bool TryLoadState(string stableId)
+    private static bool TryLoadState(string stableId, string seed, List<PlayerHandle> players, bool resuming)
     {
         try
         {
-            if (!System.IO.File.Exists(SavePath)) return false;
-
-            string json = System.IO.File.ReadAllText(SavePath);
-            SavedState? state = JsonSerializer.Deserialize(json, SavedStateCtx.Default.SavedState);
-            if (state == null || !string.Equals(state.StableRunId, stableId, StringComparison.Ordinal))
-                return false;
-
-            Totals.Clear();
-            _combatIndex = state.CombatIndex;
-            _combatActive = false;
-            _activePlayerKey = null;
-
-            foreach (SavedPlayer sp in state.Players)
+            SavedState? state = Archives.Load(stableId);
+            if (state == null && resuming && players.Count > 1 && _sessionGroup.Length > 0)
+                state = Archives.FindResumedMultiplayer(_sessionGroup, _startedAt);
+            // Upgrade the previous seed-only checkpoint once, only for a run that predates it
+            // and has exactly the same player IDs. The claim prevents cross-session re-import.
+            if (state == null && resuming && System.IO.File.Exists(SavePath) && !System.IO.File.Exists(SavePath + ".claimed") &&
+                ReflectionHelpers.ResolveRunStartTime() > 0 &&
+                System.IO.File.GetLastWriteTimeUtc(SavePath) >= DateTimeOffset.FromUnixTimeSeconds(ReflectionHelpers.ResolveRunStartTime()).UtcDateTime)
             {
-                Totals[sp.PlayerKey] = new PlayerDamageSnapshot
+                var legacy = JsonSerializer.Deserialize(System.IO.File.ReadAllText(SavePath), SavedStateCtx.Default.SavedState);
+                if (legacy?.StableRunId == seed && legacy.Players.Select(p => p.PlayerKey).Order()
+                    .SequenceEqual(players.Select(p => p.PlayerKey).Order()))
                 {
-                    PlayerKey = sp.PlayerKey,
-                    DisplayName = sp.DisplayName,
-                    CharacterName = sp.CharacterName,
-                    TotalDamage = sp.TotalDamage,
-                    MaxHitDamage = sp.MaxHitDamage
-                };
+                    legacy.StableRunId = stableId;
+                    legacy.SessionGroup = _sessionGroup;
+                    legacy.StartedAt = _startedAt;
+                    Archives.Save(legacy);
+                    System.IO.File.WriteAllText(SavePath + ".claimed", stableId);
+                    state = legacy;
+                }
             }
-
+            if (state == null) return false;
+            _stableRunId = state.StableRunId;
+            RestoreSavedPlayers(state);
+            _lastCombatKey = state.LastCombatKey;
+            _beforeCombatState = state.BeforeCombat;
             return true;
         }
-        catch
+        catch (Exception error)
         {
+            GD.PrintErr("[DPSMeter] Run checkpoint could not be restored: " + error.Message);
             return false;
         }
     }
+
+    private static void RestoreSavedPlayers(SavedState state)
+    {
+        Totals.Clear();
+        SupportedCards.Clear();
+        _combatIndex = state.CombatIndex;
+        _combatActive = false;
+        _activePlayerKey = null;
+        foreach (SavedPlayer player in state.Players)
+        {
+            Totals[player.PlayerKey] = new PlayerDamageSnapshot
+            {
+                PlayerKey = player.PlayerKey, DisplayName = player.DisplayName, CharacterName = player.CharacterName,
+                TotalDamage = player.TotalDamage, CombatDamage = player.CombatDamage, MaxHitDamage = player.MaxHitDamage,
+                RunSupport = player.RunSupport?.Clone() ?? new(), CombatSupport = player.CombatSupport?.Clone() ?? new()
+            };
+        }
+    }
+
 }
 
 public sealed class OverlayState
@@ -882,6 +935,8 @@ public sealed class OverlayState
 
 public sealed class PlayerDamageSnapshot
 {
+    public SupportMetrics CombatSupport { get; set; } = new();
+    public SupportMetrics RunSupport { get; set; } = new();
     public ulong PlayerKey { get; set; }
 
     public string DisplayName { get; set; } = "Unknown Player";
@@ -930,6 +985,8 @@ public sealed class PlayerDamageSnapshot
     {
         return new PlayerDamageSnapshot
         {
+            CombatSupport = CombatSupport.Clone(),
+            RunSupport = RunSupport.Clone(),
             PlayerKey = PlayerKey,
             DisplayName = DisplayName,
             CharacterName = CharacterName,
@@ -1022,6 +1079,11 @@ internal sealed class PendingDoomDamage
 
 public sealed class SavedState
 {
+    public string SessionGroup { get; set; } = "";
+    public long StartedAt { get; set; }
+    public bool Completed { get; set; }
+    public string? LastCombatKey { get; set; }
+    public SavedState? BeforeCombat { get; set; }
     public string StableRunId { get; set; } = "";
     public int CombatIndex { get; set; }
     public List<SavedPlayer> Players { get; set; } = new();
@@ -1029,6 +1091,9 @@ public sealed class SavedState
 
 public sealed class SavedPlayer
 {
+    public decimal CombatDamage { get; set; }
+    public SupportMetrics CombatSupport { get; set; } = new();
+    public SupportMetrics RunSupport { get; set; } = new();
     public ulong PlayerKey { get; set; }
     public string DisplayName { get; set; } = "";
     public string CharacterName { get; set; } = "";

@@ -8,7 +8,7 @@ namespace DPSMeter;
 /// </summary>
 public sealed partial class DPSMeterOverlay : CanvasLayer
 {
-    private const float ExpandedWidth = 440f;
+    private const float ExpandedWidth = 600f;
     private const float CompactWidth = 248f;
     private const float SideTabWidth = 86f;
     private const float SideTabHeight = 32f;
@@ -30,7 +30,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         ["COMBAT"] = "Combat",
         ["LAST"] = "Last",
         ["MAX"] = "Max",
-        ["EMPTY"] = "Waiting for combat events…",
+        ["EMPTY"] = "Waiting for combat eventsâ€¦",
         ["TAB_METER"] = "Meter",
         ["TAB_CARDS"] = "Card Usage",
         ["TAB_RECEIVED"] = "Received Damage",
@@ -45,7 +45,35 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         ["INCOMING"] = "Incoming",
         ["BLOCKED"] = "Blocked",
         ["HP_LOST"] = "HP Lost",
-        ["BLOCK_GAINED"] = "Block+"
+        ["BLOCK_GAINED"] = "Block+",
+        ["TAB_SUPPORT"] = "Support",
+        ["RUN_SCOPE"] = "Whole run",
+        ["COPY_SUMMARY"] = "Copy summary",
+        ["COPIED"] = "Copied!",
+        ["SCOPE_NOTE"] = "Scope for Support, Card Usage, Received Damage, Kills / Deaths, Healing, and copied summaries. Meter shows both fight and run damage.",
+        ["BLOCK_GIVEN"] = "Block made",
+        ["ALLY_BLOCK"] = "Ally block",
+        ["ALLY_BUFFS"] = "Ally buffs",
+        ["DEBUFFS"] = "Debuffs",
+        ["ALLY_SKILLS"] = "Ally skills",
+        ["DAMAGE"] = "Damage",
+        ["SUMMARY_TITLE"] = "Slay the Spire 2 - Party contributions",
+        ["SUMMARY_NOTE"] = "Observed events only. Ally skills = Skill plays that granted tracked block, positive buffs or healing to another player (once per play). Buff/debuff counts are additions per recipient; stacks are listed by type. Block made uses known card sources and is not damage prevented. Healing counts actual HP restored; unknown providers receive no credit. Energy, draw, cleanses and damage amplification are not attributed. Kills require a sourced lethal hit and confirmed death; automatic cleanup and prevented deaths are excluded. Deaths exclude abandoning. No overall contribution score.",
+        ["SUPPORT_HELP"] = "Block made: source-attributed card block, including self. Ally block: granted to other players. Ally buffs: positive buff additions per recipient. Debuffs: positive debuff additions on enemies. Ally skills: Skill plays with tracked ally block/buff/healing, once per play. Hover a row for buff stacks. Unattributed passive block is excluded.",
+        ["BUFF_DETAIL"] = "Buff stacks given to allies",
+        ["TAB_KILLS"] = "Kills / Deaths",
+        ["KILLS"] = "Enemy kills",
+        ["BOSS_KILLS"] = "Boss kills",
+        ["BOSS_HONORS"] = "Boss finishing blows",
+        ["LAST_BOSS"] = "Last boss finished",
+        ["NO_BOSS"] = "—",
+        ["KILLS_HELP"] = "Credit for a sourced lethal hit followed by confirmed death. Boss kills are primary enemies in boss encounters; summoned minions only count as enemy kills when directly killed. Prevented deaths and automatic cleanup get no credit. Revived enemies can be credited on a later death. Boss honors belong to this run. Deaths count confirmed player deaths once per life; prevented deaths and abandoning the run are excluded. Reviving allows a later death to count again.",
+        ["DEATHS"] = "Deaths",
+        ["TAB_HEALING"] = "Healing",
+        ["HEALING_DONE"] = "Healing done",
+        ["ALLY_HEALING"] = "Ally healing",
+        ["HEALING_RECEIVED"] = "Healing received",
+        ["HEALING_HELP"] = "Actual HP restored, excluding overhealing. Healing done includes self; ally healing excludes self. Provider credit requires an identifiable executing card or effect. Unattributed heals, including rest sites, count only as received. Revivals by direct HP assignment are not healing. Combat shows this fight; Whole run includes out-of-combat heals.",
     };
 
     private static Dictionary<string, string> LoadLocStrings()
@@ -62,7 +90,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         return loaded is { Count: > 0 } ? loaded : DefaultLocStrings();
     }
 
-    private static string L(string key) => LocStrings.TryGetValue(key, out string? v) ? v : key;
+    internal static string L(string key) => LocStrings.TryGetValue(key, out string? v) ? v : key;
 
     // ── Palette (keep it minimal) ──────────────────────────────
     private static readonly Color White = new("FFFFFF");
@@ -91,6 +119,8 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
     private static readonly Dictionary<string, Texture2D?> IconCache = new(System.StringComparer.OrdinalIgnoreCase);
 
     private static DPSMeterOverlay? _instance;
+    private static bool _shuttingDown;
+    private bool _statsRefreshQueued;
 
     private Control? _root;
     private MarginContainer? _contentPad;
@@ -103,13 +133,17 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
     private Button? _meterTabBtn;
     private Button? _cardsTabBtn;
     private Button? _receivedTabBtn;
+    private Button? _supportTabBtn;
+    private Button? _killsTabBtn;
+    private Button? _healingTabBtn;
+    private bool _runScope = true;
     private Button? _toggleBtn;
     private Button? _hideBtn;
     private Button? _sideTab;
     private bool _isDragging;
     private Vector2 _dragOffset;
     private bool _expanded = true;
-    private OverlayTab _activeTab = OverlayTab.Meter;
+    private OverlayTab _activeTab = OverlayTab.Support;
     private bool _hiddenToSide;
     private HiddenDockSide _hiddenSide = HiddenDockSide.Right;
     private bool _layoutRefreshQueued;
@@ -124,7 +158,25 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
     /// </summary>
     public static void ScheduleCreate()
     {
+        if (_shuttingDown) return;
         _pendingCreate = true;
+    }
+
+    public static void Shutdown()
+    {
+        _shuttingDown = true;
+        _pendingCreate = false;
+        var overlay = _instance;
+        _instance = null;
+        if (GodotObject.IsInstanceValid(overlay))
+        {
+            RunDPSMeterService.Changed -= overlay!.OnChanged;
+            overlay._lastState = null;
+            if (overlay.IsInsideTree()) overlay.Free();
+            else overlay.QueueFree();
+        }
+        // These textures are owned by the game; drop references without disposing them.
+        IconCache.Clear();
     }
 
 
@@ -179,6 +231,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
 
         // ── Metric tabs ──
         col.AddChild(BuildTabBar());
+        col.AddChild(BuildShareBar());
 
         // ── Column headings ──
         _columnHeadings = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
@@ -314,6 +367,78 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         return tab;
     }
 
+    private SupportMetrics Stats(PlayerDamageSnapshot snapshot) => _runScope ? snapshot.RunSupport : snapshot.CombatSupport;
+
+    private Control BuildShareBar()
+    {
+        var bar = new HBoxContainer();
+        bar.AddThemeConstantOverride("separation", 6);
+        var scope = new Button { Text = L("RUN_SCOPE"), TooltipText = L("SCOPE_NOTE"), FocusMode = Control.FocusModeEnum.None };
+        scope.Pressed += () =>
+        {
+            _runScope = !_runScope;
+            scope.Text = L(_runScope ? "RUN_SCOPE" : "COMBAT");
+            ApplyState(RunDPSMeterService.BuildOverlayState());
+        };
+        var copy = new Button { Text = L("COPY_SUMMARY"), FocusMode = Control.FocusModeEnum.None };
+        copy.Pressed += () =>
+        {
+            DisplayServer.ClipboardSet(RunDPSMeterService.BuildShareSummary(_runScope));
+            copy.Text = L("COPIED");
+        };
+        copy.MouseExited += () => copy.Text = L("COPY_SUMMARY");
+        bar.AddChild(scope);
+        bar.AddChild(copy);
+        return bar;
+    }
+
+    private Control CreateSupportRow(PlayerDamageSnapshot snap)
+    {
+        var stats = Stats(snap);
+        var row = CreateStatsRow(snap, new[]
+        {
+            (RunDPSMeterService.Format(stats.BlockGiven), Green, 70),
+            (RunDPSMeterService.Format(stats.AllyBlock), Cyan, 70),
+            (stats.AllyBuffs.ToString(), Yellow, 70),
+            (stats.EnemyDebuffs.ToString(), new Color("FF79C6"), 70),
+            (stats.AllySkillPlays.ToString(), Green, 70)
+        });
+        row.TooltipText = L("SUPPORT_HELP") + "\n\n" + L("BUFF_DETAIL") + "\n" +
+            string.Join("\n", stats.AllyBuffStacks.OrderBy(p => p.Key).Select(p => $"{p.Key}: +{RunDPSMeterService.Format(p.Value)}"));
+        row.MouseFilter = Control.MouseFilterEnum.Pass;
+        return row;
+    }
+
+    private Control CreateKillsRow(PlayerDamageSnapshot snap)
+    {
+        var stats = Stats(snap);
+        var last = stats.BossFinishes.LastOrDefault() ?? L("NO_BOSS");
+        var row = CreateStatsRow(snap, new[]
+        {
+            (stats.Kills.ToString(), White, 78),
+            (stats.BossKills.ToString(), Yellow, 78),
+            (stats.Deaths.ToString(), Red, 54),
+            (last.Length > 15 ? last[..14] + "…" : last, Cyan, 140)
+        });
+        row.TooltipText = L("KILLS_HELP") + "\n\n" + L("BOSS_HONORS") + "\n" + string.Join("\n", stats.BossFinishes);
+        row.MouseFilter = Control.MouseFilterEnum.Pass;
+        return row;
+    }
+
+    private Control CreateHealingRow(PlayerDamageSnapshot snap)
+    {
+        var stats = Stats(snap);
+        var row = CreateStatsRow(snap, new[]
+        {
+            (RunDPSMeterService.Format(stats.HealingDone), Green, 100),
+            (RunDPSMeterService.Format(stats.AllyHealing), Cyan, 100),
+            (RunDPSMeterService.Format(stats.HealingReceived), Yellow, 100)
+        });
+        row.TooltipText = L("HEALING_HELP");
+        row.MouseFilter = Control.MouseFilterEnum.Pass;
+        return row;
+    }
+
     private Control BuildTabBar()
     {
         HBoxContainer tabs = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
@@ -326,6 +451,15 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         tabs.AddChild(_meterTabBtn);
         tabs.AddChild(_cardsTabBtn);
         tabs.AddChild(_receivedTabBtn);
+        _supportTabBtn = BuildTabButton(L("TAB_SUPPORT"), OverlayTab.Support);
+        _supportTabBtn.TooltipText = L("SUPPORT_HELP");
+        tabs.AddChild(_supportTabBtn);
+        _killsTabBtn = BuildTabButton(L("TAB_KILLS"), OverlayTab.Kills);
+        _killsTabBtn.TooltipText = L("KILLS_HELP");
+        tabs.AddChild(_killsTabBtn);
+        _healingTabBtn = BuildTabButton(L("TAB_HEALING"), OverlayTab.Healing);
+        _healingTabBtn.TooltipText = L("HEALING_HELP");
+        tabs.AddChild(_healingTabBtn);
         RefreshTabButtons();
         return tabs;
     }
@@ -355,7 +489,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         RefreshColumnHeadings();
 
         if (_lastState != null)
-            ApplyState(_lastState);
+            ApplyState(RunDPSMeterService.BuildOverlayState());
         else
             QueueLayoutRefresh();
     }
@@ -365,6 +499,9 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         ApplyTabStyle(_meterTabBtn, _activeTab == OverlayTab.Meter);
         ApplyTabStyle(_cardsTabBtn, _activeTab == OverlayTab.CardUsage);
         ApplyTabStyle(_receivedTabBtn, _activeTab == OverlayTab.ReceivedDamage);
+        ApplyTabStyle(_supportTabBtn, _activeTab == OverlayTab.Support);
+        ApplyTabStyle(_killsTabBtn, _activeTab == OverlayTab.Kills);
+        ApplyTabStyle(_healingTabBtn, _activeTab == OverlayTab.Healing);
     }
 
     private static void ApplyTabStyle(Button? button, bool active)
@@ -422,6 +559,20 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
                 _columnHeadings.AddChild(HeadLabel(L("SKILL"), false, 52));
                 _columnHeadings.AddChild(HeadLabel(L("POWER"), false, 52));
                 _columnHeadings.AddChild(HeadLabel(L("AUTO"), false, 52));
+                break;
+            case OverlayTab.Kills:
+                _columnHeadings.AddChild(HeadLabel(L("KILLS"), false, 78));
+                _columnHeadings.AddChild(HeadLabel(L("BOSS_KILLS"), false, 78));
+                _columnHeadings.AddChild(HeadLabel(L("DEATHS"), false, 54));
+                _columnHeadings.AddChild(HeadLabel(L("LAST_BOSS"), false, 140));
+                break;
+            case OverlayTab.Healing:
+                foreach (var heading in new[] { "HEALING_DONE", "ALLY_HEALING", "HEALING_RECEIVED" })
+                    _columnHeadings.AddChild(HeadLabel(L(heading), false, 100));
+                break;
+            case OverlayTab.Support:
+                foreach (var heading in new[] { "BLOCK_GIVEN", "ALLY_BLOCK", "ALLY_BUFFS", "DEBUFFS", "ALLY_SKILLS" })
+                    _columnHeadings.AddChild(HeadLabel(L(heading), false, 70));
                 break;
             case OverlayTab.ReceivedDamage:
                 _columnHeadings.AddChild(HeadLabel(L("INCOMING"), false, 62));
@@ -550,11 +701,11 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
             snap,
             new[]
             {
-                (RunDPSMeterService.Format(snap.CardsPlayed), Yellow, 52),
-                (RunDPSMeterService.Format(snap.AttackCardsPlayed), Red, 52),
-                (RunDPSMeterService.Format(snap.SkillCardsPlayed), Cyan, 52),
-                (RunDPSMeterService.Format(snap.PowerCardsPlayed), new Color("FF79C6"), 52),
-                (RunDPSMeterService.Format(snap.AutoCardsPlayed), Green, 52)
+                (RunDPSMeterService.Format(Stats(snap).Cards), Yellow, 52),
+                (RunDPSMeterService.Format(Stats(snap).Attacks), Red, 52),
+                (RunDPSMeterService.Format(Stats(snap).Skills), Cyan, 52),
+                (RunDPSMeterService.Format(Stats(snap).Powers), new Color("FF79C6"), 52),
+                (RunDPSMeterService.Format(Stats(snap).Auto), Green, 52)
             });
     }
 
@@ -564,11 +715,11 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
             snap,
             new[]
             {
-                (RunDPSMeterService.Format(snap.IncomingDamage), Yellow, 62),
-                (RunDPSMeterService.Format(snap.BlockedDamage), Cyan, 62),
-                (RunDPSMeterService.Format(snap.HpLostDamage), Red, 62),
-                (RunDPSMeterService.Format(snap.MaxDamageReceived), new Color("FF79C6"), 52),
-                (RunDPSMeterService.Format(snap.BlockGained), Green, 52)
+                (RunDPSMeterService.Format(Stats(snap).Incoming), Yellow, 62),
+                (RunDPSMeterService.Format(Stats(snap).Blocked), Cyan, 62),
+                (RunDPSMeterService.Format(Stats(snap).HpLost), Red, 62),
+                (RunDPSMeterService.Format(Stats(snap).MaxHpLost), new Color("FF79C6"), 52),
+                (RunDPSMeterService.Format(Stats(snap).BlockReceived), Green, 52)
             });
     }
 
@@ -671,7 +822,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         RefreshChrome();
 
         if (_lastState != null)
-            ApplyState(_lastState);
+            ApplyState(RunDPSMeterService.BuildOverlayState());
         else
             QueueLayoutRefresh();
     }
@@ -693,7 +844,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         RefreshChrome();
         SnapRootIntoViewFromSide();
         if (_lastState != null)
-            ApplyState(_lastState);
+            ApplyState(RunDPSMeterService.BuildOverlayState());
         else
             QueueLayoutRefresh();
     }
@@ -805,13 +956,19 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
 
     private void OnChanged(OverlayState s)
     {
-        if (!IsInsideTree()) return;
-        Callable.From(() => ApplyState(s)).CallDeferred();
+        if (_shuttingDown || !IsInsideTree() || _statsRefreshQueued) return;
+        _statsRefreshQueued = true;
+        Callable.From(() =>
+        {
+            _statsRefreshQueued = false;
+            if (!_shuttingDown && IsInsideTree()) ApplyState(RunDPSMeterService.BuildOverlayState());
+        }).CallDeferred();
     }
 
     private void ApplyState(OverlayState s)
     {
-        if (_rows == null || _emptyLabel == null) return;
+        if (_shuttingDown || _rows == null || _emptyLabel == null) return;
+        Visible = s.Players.Count > 0;
 
         bool resetScroll = !string.Equals(_lastAppliedRunToken, s.RunToken, System.StringComparison.Ordinal)
             || _lastAppliedCombatIndex != s.CombatIndex;
@@ -840,10 +997,11 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         for (int i = 0; i < s.Players.Count; i++)
             teamTotal += s.Players[i].TotalDamage;
 
-        for (int i = 0; i < s.Players.Count; i++)
+        var displayPlayers = _activeTab == OverlayTab.Meter ? s.Players : s.Players.OrderBy(p => p.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
+        for (int i = 0; i < displayPlayers.Count; i++)
         {
             float ratio = teamTotal > 0 ? (float)(s.Players[i].TotalDamage / teamTotal) : 0f;
-            _rows.AddChild(CreatePlayerRowForActiveTab(s.Players[i], ratio));
+            _rows.AddChild(CreatePlayerRowForActiveTab(displayPlayers[i], ratio));
         }
 
         RefreshChrome();
@@ -856,14 +1014,20 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
         {
             return _activeTab switch
             {
-                OverlayTab.CardUsage => CreateCompactStatsRow(snap, RunDPSMeterService.Format(snap.CardsPlayed), Yellow),
-                OverlayTab.ReceivedDamage => CreateCompactStatsRow(snap, RunDPSMeterService.Format(snap.HpLostDamage), Red),
+                OverlayTab.Healing => CreateCompactStatsRow(snap, L("ALLY_HEALING") + " " + RunDPSMeterService.Format(Stats(snap).AllyHealing), Green),
+                OverlayTab.Kills => CreateCompactStatsRow(snap, L("KILLS") + " " + Stats(snap).Kills + " | " + L("BOSS_KILLS") + " " + Stats(snap).BossKills, Yellow),
+                OverlayTab.Support => CreateCompactStatsRow(snap, L("ALLY_BLOCK") + " " + RunDPSMeterService.Format(Stats(snap).AllyBlock) + " | " + L("ALLY_BUFFS") + " " + Stats(snap).AllyBuffs, Cyan),
+                OverlayTab.CardUsage => CreateCompactStatsRow(snap, RunDPSMeterService.Format(Stats(snap).Cards), Yellow),
+                OverlayTab.ReceivedDamage => CreateCompactStatsRow(snap, RunDPSMeterService.Format(Stats(snap).HpLost), Red),
                 _ => CreateCompactRow(snap, damageRatio)
             };
         }
 
         return _activeTab switch
         {
+            OverlayTab.Healing => CreateHealingRow(snap),
+            OverlayTab.Kills => CreateKillsRow(snap),
+            OverlayTab.Support => CreateSupportRow(snap),
             OverlayTab.CardUsage => CreateCardUsageRow(snap),
             OverlayTab.ReceivedDamage => CreateReceivedDamageRow(snap),
             _ => CreateRow(snap, damageRatio)
@@ -985,7 +1149,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
 
     private void QueueLayoutRefresh()
     {
-        if (_layoutRefreshQueued)
+        if (_shuttingDown || _layoutRefreshQueued)
             return;
 
         _layoutRefreshQueued = true;
@@ -996,7 +1160,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
     {
         _layoutRefreshQueued = false;
 
-        if (_hiddenToSide || _root == null || _bodyScroll == null || _bodyContent == null)
+        if (_shuttingDown || !IsInsideTree() || _hiddenToSide || _root == null || _bodyScroll == null || _bodyContent == null)
             return;
 
         float width = _expanded ? ExpandedWidth : CompactWidth;
@@ -1126,6 +1290,7 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
 
     public static void EnsureCreated()
     {
+        if (_shuttingDown) return;
         if (IsInstanceValid(_instance))
         {
             return;
@@ -1151,6 +1316,9 @@ public sealed partial class DPSMeterOverlay : CanvasLayer
     {
         Meter,
         CardUsage,
-        ReceivedDamage
+        ReceivedDamage,
+        Support,
+        Kills,
+        Healing
     }
 }
