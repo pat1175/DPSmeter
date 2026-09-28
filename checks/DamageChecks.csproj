@@ -4,11 +4,13 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <GameData Condition="'$(GameData)' == '' And '$(Sts2DataDir)' != ''">$(Sts2DataDir)</GameData>
     <GameData Condition="'$(GameData)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64</GameData>
     <MeterAssembly Condition="'$(MeterAssembly)' == ''">$(MSBuildThisFileDirectory)../dist/DPSMeter/DPSMeter.dll</MeterAssembly>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="DamageProgram.cs" />
     <Reference Include="DPSMeter"><HintPath>$(MeterAssembly)</HintPath></Reference>
     <Reference Include="sts2"><HintPath>$(GameData)/sts2.dll</HintPath></Reference>
     <Reference Include="0Harmony"><HintPath>$(GameData)/0Harmony.dll</HintPath></Reference>

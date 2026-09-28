@@ -4,7 +4,7 @@ With the .NET SDK and game installed, build without installing into the game:
 
 ```powershell
 dotnet build DPSMeter.csproj -c ExportRelease -p:Sts2ModsDir=dist/DPSMeter
-dotnet run --project checks/SupportChecks.csproj
+dotnet run --project checks/DamageChecks.csproj
 python -m unittest discover -s tests -v
 ```
 

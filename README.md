@@ -25,11 +25,6 @@ STS2 only blocks multiplayer joins when **gameplay-affecting** mods differ. DPS 
 - Compact and side-hidden UI states
 - English UI text only
 
-Outgoing damage includes damage absorbed by enemy block plus actual HP damage. For example,
-a 30-damage hit against 20 block credits 30 damage (20 block + 10 HP). Fully blocked hits
-also count. Excess overkill beyond the target's remaining HP is excluded. This applies to
-fight/run totals and last/max values; previously saved totals are not recalculated.
-
 ## Quick install from GitHub
 
 The installer downloads `DPSMeter.zip` from the latest GitHub Release unless `DPSMETER_PACKAGE` points at a local zip.
@@ -74,6 +69,12 @@ irm https://raw.githubusercontent.com/xvc323/DPSmeter/main/scripts/uninstall-win
 ```
 
 ## Save handling
+
+Outgoing damage includes damage absorbed by enemy block plus actual HP damage. For example,
+a 30-damage hit against 20 block credits 30 damage (20 block + 10 HP). Fully blocked hits
+also count. Excess overkill beyond the target's remaining HP is excluded. This applies to
+fight/run totals and last/max values; previously saved totals are not recalculated.
+See [damage checks](checks/DAMAGE.md) for regression-test instructions.
 
 The install and uninstall scripts **do not touch, copy, delete, symlink, or junction any saves**. They only install or remove the `mods/DPSMeter` folder.
 
