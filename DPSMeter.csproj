@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
-    <DefaultItemExcludes>$(DefaultItemExcludes);game-src\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);game-src\**;checks\**</DefaultItemExcludes>
 
     <!-- Override Sts2Dir/Sts2DataDir/Sts2ModsDir from the command line if Steam is installed elsewhere. -->
     <Sts2Dir Condition="'$(Sts2Dir)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">$(HOME)/Library/Application Support/Steam/steamapps/common/Slay the Spire 2</Sts2Dir>
