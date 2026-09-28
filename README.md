@@ -24,6 +24,11 @@ STS2 only blocks multiplayer joins when **gameplay-affecting** mods differ. DPS 
 - DLL-only install; no separate `.pck` is required
 - Compact and side-hidden UI states
 - English UI text only
+- Party support, healing, enemy kills, boss finishing blows and player deaths
+- Whole-run/combat scopes, clipboard summaries and separate resumable solo/co-op meter archives
+
+See [party statistics](docs/party-statistics.md) for metric definitions, persistence
+behavior and live-validation limits, and [checks](checks/README.md) for isolated tests.
 
 ## Quick install from GitHub
 

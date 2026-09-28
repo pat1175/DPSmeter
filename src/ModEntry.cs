@@ -37,11 +37,16 @@ public static class ModEntry
         PatchHook(nameof(Hook.AfterDamageGiven), nameof(HookPatches.AfterDamageGivenPostfix));
         PatchHook(nameof(Hook.AfterDamageReceived), nameof(HookPatches.AfterDamageReceivedPostfix));
         PatchHook(nameof(Hook.AfterBlockGained), nameof(HookPatches.AfterBlockGainedPostfix));
+        // Observe the resolved power delta before reactions can change its owner or amount.
+        _harmony.Patch(AccessTools.Method(typeof(Hook), nameof(Hook.AfterPowerAmountChanged)),
+            prefix: new HarmonyMethod(typeof(SupportHookPatches), nameof(SupportHookPatches.PowerChanged)));
         PatchHook(nameof(Hook.AfterDiedToDoom), nameof(HookPatches.AfterDiedToDoomPostfix));
         PatchMethod(typeof(PoisonPower), nameof(PoisonPower.AfterSideTurnStart), nameof(StatusPowerPatches.PoisonAfterSideTurnStartPrefix), nameof(StatusPowerPatches.PoisonAfterSideTurnStartPostfix));
         PatchMethod(typeof(DoomPower), nameof(DoomPower.DoomKill), nameof(StatusPowerPatches.DoomKillPrefix));
         PatchMethod(typeof(RunManager), nameof(RunManager.OnEnded), postfixName: nameof(HookPatches.RunEndedPostfix), patchType: typeof(HookPatches));
         PatchPowerDamageMethods();
+        PatchKillAndMenuHooks();
+        PatchHealthHooks();
 
         // Write to log file for debugging
         string logDir = OS.GetUserDataDir();
@@ -66,6 +71,32 @@ public static class ModEntry
             ?? throw new MissingMethodException(typeof(HookPatches).FullName, postfixName);
 
         _harmony!.Patch(original, postfix: new HarmonyMethod(postfix));
+    }
+
+    private static void PatchKillAndMenuHooks()
+    {
+        _harmony!.Patch(AccessTools.Method(typeof(Hook), nameof(Hook.AfterDamageGiven)),
+            prefix: new HarmonyMethod(typeof(KillTrackingPatches), nameof(KillTrackingPatches.DamageGivenPrefix)));
+        _harmony.Patch(AccessTools.Method(typeof(Hook), nameof(Hook.AfterDeath)),
+            prefix: new HarmonyMethod(typeof(KillTrackingPatches), nameof(KillTrackingPatches.DeathPrefix)));
+        _harmony.Patch(AccessTools.Method(typeof(MegaCrit.Sts2.Core.Nodes.NGame), "LoadMainMenu"),
+            prefix: new HarmonyMethod(typeof(KillTrackingPatches), nameof(KillTrackingPatches.MainMenuPrefix)));
+        _harmony.Patch(AccessTools.Method(typeof(MegaCrit.Sts2.Core.Nodes.NGame), "StartRun"),
+            prefix: new HarmonyMethod(typeof(KillTrackingPatches), nameof(KillTrackingPatches.NewRunPrefix)));
+        _harmony.Patch(AccessTools.Method(typeof(MegaCrit.Sts2.Core.Nodes.NGame), "LoadRun"),
+            prefix: new HarmonyMethod(typeof(KillTrackingPatches), nameof(KillTrackingPatches.RunLoadedPrefix)));
+    }
+
+    private static void PatchHealthHooks()
+    {
+        var patch = typeof(HealthTrackingPatches);
+        _harmony!.Patch(AccessTools.Method(typeof(Creature), "HealInternal"),
+            prefix: new HarmonyMethod(patch, "HealPrefix"), postfix: new HarmonyMethod(patch, "HealPostfix"));
+        _harmony.Patch(AccessTools.Method(typeof(Creature), "SetCurrentHpInternal"),
+            postfix: new HarmonyMethod(patch, "HealthChangedPostfix"));
+        _harmony.Patch(AccessTools.Method(typeof(PlayerChoiceContext), "PushModel"), postfix: new HarmonyMethod(patch, "PushModelPostfix"));
+        _harmony.Patch(AccessTools.Method(typeof(PlayerChoiceContext), "PopModel"), postfix: new HarmonyMethod(patch, "PopModelPostfix"));
+        _harmony.Patch(AccessTools.Method(typeof(MegaCrit.Sts2.Core.Nodes.NGame), "Quit"), prefix: new HarmonyMethod(patch, "QuitPrefix"));
     }
 
     private static void PatchMethod(Type ownerType, string methodName, string? prefixName = null, string? postfixName = null, Type? patchType = null)
@@ -240,6 +271,7 @@ internal static class HookPatches
         EnsureOverlayCreated();
         RunDPSMeterService.EnsurePlayersRegistered(combatState);
         RunDPSMeterService.RecordBlockGained(creature, amount);
+        SupportHookPatches.BlockGiven(creature, amount, cardSource);
     }
 
     // RunManager.OnEnded(bool isVictory)
